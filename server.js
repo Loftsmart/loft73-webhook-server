@@ -95,6 +95,81 @@ app.get('/shopify/test-jsonp', (req, res) => {
 });
 
 // ================================
+// SHOPIFY API ENDPOINTS
+// ================================
+
+// Endpoint per caricare prodotti Shopify
+app.post('/api/shopify/products', async (req, res) => {
+  const { storeUrl, accessToken, limit = 250 } = req.body;
+  
+  if (!storeUrl || !accessToken) {
+    return res.status(400).json({
+      success: false,
+      error: 'Store URL e Access Token richiesti'
+    });
+  }
+  
+  try {
+    console.log(`📦 Caricando prodotti da: ${storeUrl}`);
+    
+    // Chiamata all'API Shopify
+    const response = await fetch(`https://${storeUrl}/admin/api/2023-10/products.json?limit=${limit}`, {
+      method: 'GET',
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+        'Content-Type': 'application/json',
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Shopify API Error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    
+    console.log(`✅ ${data.products?.length || 0} prodotti caricati`);
+    
+    res.json({
+      success: true,
+      products: data.products || [],
+      totalProducts: data.products?.length || 0,
+      source: 'shopify_api',
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('❌ Errore Shopify API:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      source: 'shopify_api'
+    });
+  }
+});
+
+// Endpoint per dati dashboard
+app.get('/api/dashboard-data', (req, res) => {
+  const data = {
+    success: true,
+    message: 'Dashboard data endpoint attivo',
+    timestamp: new Date().toISOString(),
+    status: 'ready',
+    endpoints: [
+      'POST /api/shopify/products',
+      'GET /api/dashboard-data'
+    ]
+  };
+  
+  if (req.query.callback) {
+    res.header('Content-Type', 'application/javascript');
+    res.send(`${req.query.callback}(${JSON.stringify(data)});`);
+    return;
+  }
+  
+  res.json(data);
+});
+
+// ================================
 // TRADITIONAL ENDPOINTS (BACKUP)
 // ================================
 
@@ -119,7 +194,9 @@ app.get('/webhook-status', (req, res) => {
     jsonp: 'enabled',
     endpoints: [
       '/test-connection?callback=myCallback',
-      '/shopify/test-jsonp?callback=myCallback'
+      '/shopify/test-jsonp?callback=myCallback',
+      'POST /api/shopify/products',
+      'GET /api/dashboard-data'
     ]
   };
   
@@ -188,7 +265,9 @@ app.use('*', (req, res) => {
       '/?callback=myFunc',
       '/test-connection?callback=myFunc',
       '/shopify/test-jsonp?callback=myFunc',
-      '/sandbox'
+      '/sandbox',
+      'POST /api/shopify/products',
+      'GET /api/dashboard-data'
     ]
   };
   
@@ -229,6 +308,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('🔥 JSONP: ENABLED');
   console.log('🔥 CSP BYPASS: ACTIVE');
   console.log('🔥 IFRAME SANDBOX: READY');
+  console.log('🔥 SHOPIFY API: ENABLED');
   console.log('🔥 =====================================');
 });
 
