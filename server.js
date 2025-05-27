@@ -1,72 +1,98 @@
 const express = require('express');
-const cors = require('cors');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ================================
-// CORS CONFIGURATION - FIX PRINCIPALE!
+// CORS DEFINITIVO - APPROCCIO ESPERTO
 // ================================
 
-// Configura CORS per permettere richieste da claude.ai
-const corsOptions = {
-  origin: [
-    'https://claude.ai',
-    'https://*.claude.ai',
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'https://loft73-webhook-server-production.up.railway.app',
-    '*' // Permette TUTTI i domini per debug (puoi rimuovere dopo test)
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'Accept',
-    'Origin'
-  ],
-  optionsSuccessStatus: 200 // Per compatibilità con browser legacy
-};
-
-// APPLICA CORS A TUTTE LE ROUTE
-app.use(cors(corsOptions));
+// CORS Headers manuali - PIÙ AGGRESSIVO DI MIDDLEWARE
+app.use((req, res, next) => {
+  // PERMETTI TUTTO - NESSUNA RESTRIZIONE
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,HEAD,PATCH');
+  res.header('Access-Control-Allow-Headers', '*');
+  res.header('Access-Control-Allow-Credentials', 'false'); // false per wildcard
+  res.header('Access-Control-Max-Age', '86400');
+  
+  // HEADERS AGGIUNTIVI PER CSP E SICUREZZA
+  res.header('Cross-Origin-Embedder-Policy', 'unsafe-none');
+  res.header('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.header('Cross-Origin-Resource-Policy', 'cross-origin');
+  
+  // DISABLE CSP CHE CAUSA PROBLEMI
+  res.header('Content-Security-Policy', '');
+  res.header('X-Content-Security-Policy', '');
+  res.header('X-WebKit-CSP', '');
+  
+  // RISPOSTA IMMEDIATA PER PREFLIGHT
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+  
+  next();
+});
 
 // Middleware per JSON
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// ================================
-// LOGGING MIDDLEWARE
-// ================================
+// LOGGING AVANZATO
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
+  console.log(`[${timestamp}] ${req.method} ${req.path}`);
+  console.log(`Origin: ${req.headers.origin || 'NONE'}`);
+  console.log(`User-Agent: ${req.headers['user-agent'] || 'NONE'}`);
+  console.log(`Headers:`, Object.keys(req.headers));
   next();
 });
 
 // ================================
-// ROUTE PRINCIPALI
+// ENDPOINTS PRINCIPALI
 // ================================
 
-// Home endpoint - Test connessione
+// ROOT - Test connessione
 app.get('/', (req, res) => {
-  res.json({
+  const response = {
     status: 'online',
-    service: 'LOFT.73 Shopify Webhook Server',
-    version: '1.1.0',  // Aggiornato per CORS fix
+    service: 'LOFT.73 Webhook Server - CORS ULTIMATE',
+    version: '2.0.0',
     timestamp: new Date().toISOString(),
-    cors: 'enabled',
-    message: '🎉 CORS configurato per claude.ai!'
+    cors: 'AGGRESSIVO',
+    headers_sent: {
+      'access-control-allow-origin': res.getHeader('Access-Control-Allow-Origin'),
+      'access-control-allow-methods': res.getHeader('Access-Control-Allow-Methods'),
+      'access-control-allow-headers': res.getHeader('Access-Control-Allow-Headers')
+    },
+    message: '🔥 CORS DEFINITIVO ATTIVO - NESSUNA RESTRIZIONE'
+  };
+  
+  console.log('🎯 ROOT REQUEST - Sending response:', response);
+  res.json(response);
+});
+
+// ENDPOINT DEBUG SPECIFICO
+app.get('/debug-cors', (req, res) => {
+  res.json({
+    success: true,
+    message: 'CORS DEBUG ENDPOINT',
+    request_headers: req.headers,
+    response_headers: {
+      'Access-Control-Allow-Origin': res.getHeader('Access-Control-Allow-Origin'),
+      'Access-Control-Allow-Methods': res.getHeader('Access-Control-Allow-Methods'),
+      'Access-Control-Allow-Headers': res.getHeader('Access-Control-Allow-Headers')
+    },
+    timestamp: new Date().toISOString()
   });
 });
 
-// Health check
+// HEALTH CHECK
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     uptime: process.uptime(),
+    memory: process.memoryUsage(),
     timestamp: new Date().toISOString()
   });
 });
@@ -75,131 +101,141 @@ app.get('/health', (req, res) => {
 // SHOPIFY ENDPOINTS
 // ================================
 
-// Test autenticazione Shopify
+// Test Shopify - VERSIONE ROBUSTA
 app.post('/shopify/test', async (req, res) => {
+  console.log('🔐 SHOPIFY TEST REQUEST:', req.body);
+  
   const { storeUrl, accessToken } = req.body;
   
   if (!storeUrl || !accessToken) {
+    console.log('❌ Missing credentials');
     return res.status(400).json({
       success: false,
-      error: 'storeUrl and accessToken required'
+      error: 'storeUrl and accessToken required',
+      received: { storeUrl: !!storeUrl, accessToken: !!accessToken }
     });
   }
 
   try {
-    // Costruisce URL per test Shopify
-    const shopifyUrl = `https://${storeUrl}/admin/api/2023-10/shop.json`;
+    // IMPORTA fetch dinamicamente
+    const fetch = (await import('node-fetch')).default;
     
-    console.log(`Testing Shopify connection: ${shopifyUrl}`);
+    // Pulisci storeUrl
+    const cleanStoreUrl = storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const shopifyUrl = `https://${cleanStoreUrl}/admin/api/2023-10/shop.json`;
     
-    // Test chiamata a Shopify
-    const fetch = require('node-fetch');
+    console.log(`🔗 Testing: ${shopifyUrl}`);
+    
     const response = await fetch(shopifyUrl, {
       method: 'GET',
       headers: {
         'X-Shopify-Access-Token': accessToken,
-        'Content-Type': 'application/json'
-      }
+        'Content-Type': 'application/json',
+        'User-Agent': 'LOFT73-Webhook-Server/2.0'
+      },
+      timeout: 10000
     });
+
+    console.log(`📊 Shopify Response: ${response.status}`);
 
     if (response.ok) {
       const shopData = await response.json();
-      console.log('✅ Shopify test successful');
+      console.log('✅ Shopify SUCCESS');
       
       res.json({
         success: true,
         message: 'Shopify authentication successful',
         shopInfo: {
           name: shopData.shop?.name || 'Unknown',
-          domain: shopData.shop?.domain || storeUrl,
-          id: shopData.shop?.id || 'Unknown'
+          domain: shopData.shop?.domain || cleanStoreUrl,
+          id: shopData.shop?.id || 'Unknown',
+          email: shopData.shop?.email || 'Unknown'
         },
+        endpoint_tested: shopifyUrl,
         timestamp: new Date().toISOString()
       });
     } else {
-      console.log(`❌ Shopify test failed: ${response.status}`);
       const errorText = await response.text();
+      console.log(`❌ Shopify FAILED: ${response.status} - ${errorText}`);
       
       res.status(400).json({
         success: false,
         error: 'Shopify authentication failed',
-        details: `HTTP ${response.status}: ${errorText}`,
+        details: `HTTP ${response.status}`,
+        response_body: errorText.substring(0, 500),
+        endpoint_tested: shopifyUrl,
         timestamp: new Date().toISOString()
       });
     }
   } catch (error) {
-    console.error('❌ Shopify test error:', error);
+    console.error('💥 Shopify ERROR:', error);
     res.status(500).json({
       success: false,
       error: 'Server error during Shopify test',
       details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// ================================
-// WEBHOOK ENDPOINTS
-// ================================
-
-// Webhook status
+// WEBHOOK STATUS
 app.get('/webhook-status', (req, res) => {
   res.json({
     status: 'active',
-    service: 'webhook-listener',
+    service: 'webhook-listener-v2',
     endpoints: [
       '/shopify/webhook/back-in-stock',
-      '/shopify/webhook/product-update'
+      '/shopify/webhook/product-update',
+      '/debug-cors'
+    ],
+    cors: 'ULTIMATE',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// WEBHOOK BACK IN STOCK
+app.post('/shopify/webhook/back-in-stock', (req, res) => {
+  console.log('📦 BACK IN STOCK WEBHOOK:', req.body);
+  
+  res.json({
+    received: true,
+    webhook: 'back-in-stock',
+    timestamp: new Date().toISOString(),
+    message: 'Webhook processed successfully'
+  });
+});
+
+// ================================
+// ERROR HANDLING DEFINITIVO
+// ================================
+
+// 404 - NOT FOUND
+app.use('*', (req, res) => {
+  console.log(`❌ 404 - ${req.method} ${req.originalUrl}`);
+  res.status(404).json({
+    error: 'Endpoint not found',
+    path: req.originalUrl,
+    method: req.method,
+    available_endpoints: [
+      'GET /',
+      'GET /health',
+      'GET /debug-cors',
+      'POST /shopify/test',
+      'GET /webhook-status'
     ],
     timestamp: new Date().toISOString()
   });
 });
 
-// Webhook per back in stock
-app.post('/shopify/webhook/back-in-stock', (req, res) => {
-  console.log('📦 Back in stock webhook received:', req.body);
-  
-  // Qui processerai il webhook di Shopify
-  // Per ora salviamo solo il log
-  
-  res.status(200).json({
-    received: true,
-    timestamp: new Date().toISOString(),
-    message: 'Back in stock webhook processed'
-  });
-});
-
-// Webhook generico prodotti
-app.post('/shopify/webhook/product-update', (req, res) => {
-  console.log('🔄 Product update webhook received:', req.body);
-  
-  res.status(200).json({
-    received: true,
-    timestamp: new Date().toISOString(),
-    message: 'Product update webhook processed'
-  });
-});
-
-// ================================
-// ERROR HANDLING
-// ================================
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    error: 'Endpoint not found',
-    path: req.originalUrl,
-    method: req.method,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Error handler globale
+// ERROR HANDLER GLOBALE
 app.use((err, req, res, next) => {
-  console.error('❌ Server error:', err);
+  console.error('💥 GLOBAL ERROR:', err);
   res.status(500).json({
     error: 'Internal server error',
     message: err.message,
+    path: req.path,
+    method: req.method,
     timestamp: new Date().toISOString()
   });
 });
@@ -209,12 +245,7 @@ app.use((err, req, res, next) => {
 // ================================
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('🚀 =================================');
-  console.log(`🚀 LOFT.73 Server STARTED`);
-  console.log(`🚀 Port: ${PORT}`);
-  console.log(`🚀 CORS: ENABLED for claude.ai`);
-  console.log(`🚀 Time: ${new Date().toISOString()}`);
-  console.log('🚀 =================================');
-});
-
-module.exports = app;
+  console.log('🔥 ===================================');
+  console.log('🔥 LOFT.73 SERVER - CORS ULTIMATE');
+  console.log(`🔥 PORT: ${PORT}`);
+  console.l
