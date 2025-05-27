@@ -1,25 +1,30 @@
 {
-  "name": "loft73-shopify-webhook-server",
-  "version": "1.0.0",
-  "description": "Webhook server for LOFT.73 Shopify integration - Railway deployment",
+  "name": "loft73-webhook-server",
+  "version": "1.1.0",
+  "description": "LOFT.73 Shopify Webhook Server with CORS fix",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
   "keywords": [
     "shopify",
     "webhook",
+    "express",
     "loft73",
-    "railway"
+    "cors"
   ],
   "author": "LOFT.73",
-  "license": "ISC",
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "license": "MIT"
 }
