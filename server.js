@@ -1,315 +1,176 @@
 const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ================================
-// CORS AGGRESSIVO + JSONP SUPPORT
-// ================================
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Configurazione Shopify dalle variabili d'ambiente Railway
+const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2023-10';
+
+// Helper per le chiamate Shopify REST API
+const shopifyAPI = axios.create({
+  baseURL: `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}`,
+  headers: {
+    'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+    'Content-Type': 'application/json'
+  }
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    service: 'LOFT.73 Shopify Webhook Server',
+    version: '1.0.0',
+    endpoints: [
+      '/api/shopify/products',
+      '/api/generate-names',
+      '/api/check-name'
+    ]
+  });
+});
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    shopify: !!SHOPIFY_ACCESS_TOKEN,
+    store: SHOPIFY_STORE_URL
+  });
+});
+
+// Endpoint per recuperare prodotti esistenti per stagione
+app.post('/api/shopify/products', async (req, res) => {
+  try {
+    const { season } = req.body;
+    console.log(`Caricando prodotti per stagione: ${season}`);
+    
+    // Usa REST API invece di GraphQL per semplicità
+    const response = await shopifyAPI.get('/products.json', {
+      params: {
+        limit: 250,
+        fields: 'id,title,tags'
+      }
+    });
+    
+    // Filtra prodotti per stagione basandosi sui tag
+    const allProducts = response.data.products || [];
+    const seasonProducts = allProducts.filter(product => {
+      const tags = product.tags ? product.tags.toLowerCase() : '';
+      return tags.includes(season.toLowerCase());
+    });
+    
+    // Estrai solo i nomi
+    const productNames = seasonProducts.map(p => p.title);
+    const uniqueNames = [...new Set(productNames)].sort();
+    
+    console.log(`Trovati ${uniqueNames.length} prodotti per ${season}`);
+    
+    res.json({
+      success: true,
+      season,
+      count: uniqueNames.length,
+      names: uniqueNames
+    });
+    
+  } catch (error) {
+    console.error('Errore Shopify:', error.response?.data || error.message);
+    res.status(500).json({
+      success: false,
+      error: error.response?.data?.errors || 'Errore nel recupero prodotti Shopify',
+      details: error.message
+    });
+  }
+});
+
+// Endpoint per generare nomi (placeholder per ora)
+app.post('/api/generate-names', async (req, res) => {
+  try {
+    const { prompt, count, season, existingNames = [] } = req.body;
+    
+    // Per ora generiamo nomi di esempio
+    // Sostituisci con OpenAI quando hai la chiave API
+    const sampleNames = [
+      'Aurora', 'Luna', 'Stella', 'Alba', 'Chiara', 'Serena', 'Marina', 'Viola',
+      'Rosa', 'Bianca', 'Elena', 'Sofia', 'Giulia', 'Emma', 'Giorgia', 'Marta',
+      'Iris', 'Flora', 'Diana', 'Silvia', 'Gemma', 'Perla', 'Asia', 'Eva',
+      'Brezza', 'Onda', 'Neve', 'Rugiada', 'Nebbia', 'Nuvola', 'Pioggia', 'Schiuma'
+    ];
+    
+    // Filtra nomi già esistenti
+    const availableNames = sampleNames.filter(name => !existingNames.includes(name));
+    const selectedNames = availableNames.slice(0, count);
+    
+    res.json({
+      success: true,
+      names: selectedNames.map((name, index) => ({
+        id: Date.now() + index,
+        name: name
+      }))
+    });
+    
+  } catch (error) {
+    console.error('Errore generazione:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Errore nella generazione nomi'
+    });
+  }
+});
+
+// Verifica singolo nome
+app.post('/api/check-name', async (req, res) => {
+  try {
+    const { name } = req.body;
+    
+    const response = await shopifyAPI.get('/products.json', {
+      params: {
+        title: name,
+        limit: 1
+      }
+    });
+    
+    const exists = response.data.products.length > 0;
+    
+    res.json({
+      success: true,
+      exists,
+      name
+    });
+    
+  } catch (error) {
+    console.error('Errore verifica nome:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Errore nella verifica del nome'
+    });
+  }
+});
+
+// CORS headers per Shopify webhooks
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', '*');
   res.header('Access-Control-Allow-Headers', '*');
   res.header('Access-Control-Allow-Credentials', 'false');
   
-  // HEADERS PER CSP BYPASS
-  res.header('Content-Security-Policy', '');
-  res.header('X-Content-Security-Policy', '');
-  res.header('X-Frame-Options', 'ALLOWALL');
-  
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
+  
   next();
 });
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// ================================
-// JSONP ENDPOINTS - CSP BYPASS
-// ================================
-
-// Root endpoint - JSONP Support
-app.get('/', (req, res) => {
-  const data = {
-    status: 'online',
-    service: 'LOFT.73 Server JSONP',
-    version: '4.0.0',
-    cors: 'ULTIMATE',
-    jsonp: 'ENABLED',
-    csp_bypass: 'ACTIVE',
-    message: '🔥 JSONP BYPASS ATTIVO!'
-  };
-  
-  // Se è richiesta JSONP
-  if (req.query.callback) {
-    res.header('Content-Type', 'application/javascript');
-    res.send(`${req.query.callback}(${JSON.stringify(data)});`);
-    return;
-  }
-  
-  res.json(data);
+app.listen(PORT, () => {
+  console.log(`🚀 LOFT.73 Server attivo su porta ${PORT}`);
+  console.log(`📦 Shopify Store: ${SHOPIFY_STORE_URL}`);
+  console.log(`🔧 API Version: ${SHOPIFY_API_VERSION}`);
 });
-
-// Test connessione JSONP
-app.get('/test-connection', (req, res) => {
-  const data = {
-    success: true,
-    message: 'Server raggiungibile via JSONP',
-    timestamp: new Date().toISOString(),
-    method: 'JSONP_BYPASS'
-  };
-  
-  if (req.query.callback) {
-    res.header('Content-Type', 'application/javascript');
-    res.send(`${req.query.callback}(${JSON.stringify(data)});`);
-    return;
-  }
-  
-  res.json(data);
-});
-
-// Shopify test JSONP
-app.get('/shopify/test-jsonp', (req, res) => {
-  const { storeUrl, accessToken, callback } = req.query;
-  
-  const data = {
-    success: true,
-    message: 'Shopify test simulato via JSONP',
-    shopInfo: {
-      name: 'Test Store JSONP',
-      domain: storeUrl || 'test.myshopify.com',
-      method: 'JSONP_BYPASS'
-    },
-    timestamp: new Date().toISOString()
-  };
-  
-  if (callback) {
-    res.header('Content-Type', 'application/javascript');
-    res.send(`${callback}(${JSON.stringify(data)});`);
-    return;
-  }
-  
-  res.json(data);
-});
-
-// ================================
-// SHOPIFY API ENDPOINTS
-// ================================
-
-// Endpoint per caricare prodotti Shopify
-app.post('/api/shopify/products', async (req, res) => {
-  const { storeUrl, accessToken, limit = 250 } = req.body;
-  
-  if (!storeUrl || !accessToken) {
-    return res.status(400).json({
-      success: false,
-      error: 'Store URL e Access Token richiesti'
-    });
-  }
-  
-  try {
-    console.log(`📦 Caricando prodotti da: ${storeUrl}`);
-    
-    // Chiamata all'API Shopify
-    const response = await fetch(`https://${storeUrl}/admin/api/2023-10/products.json?limit=${limit}`, {
-      method: 'GET',
-      headers: {
-        'X-Shopify-Access-Token': accessToken,
-        'Content-Type': 'application/json',
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Shopify API Error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    console.log(`✅ ${data.products?.length || 0} prodotti caricati`);
-    
-    res.json({
-      success: true,
-      products: data.products || [],
-      totalProducts: data.products?.length || 0,
-      source: 'shopify_api',
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error('❌ Errore Shopify API:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      source: 'shopify_api'
-    });
-  }
-});
-
-// Endpoint per dati dashboard
-app.get('/api/dashboard-data', (req, res) => {
-  const data = {
-    success: true,
-    message: 'Dashboard data endpoint attivo',
-    timestamp: new Date().toISOString(),
-    status: 'ready',
-    endpoints: [
-      'POST /api/shopify/products',
-      'GET /api/dashboard-data'
-    ]
-  };
-  
-  if (req.query.callback) {
-    res.header('Content-Type', 'application/javascript');
-    res.send(`${req.query.callback}(${JSON.stringify(data)});`);
-    return;
-  }
-  
-  res.json(data);
-});
-
-// ================================
-// TRADITIONAL ENDPOINTS (BACKUP)
-// ================================
-
-app.post('/shopify/test', (req, res) => {
-  const { storeUrl, accessToken } = req.body;
-  
-  res.json({
-    success: true,
-    message: 'Test Shopify simulato',
-    shopInfo: {
-      name: 'Test Store',
-      domain: storeUrl || 'unknown'
-    },
-    method: 'POST_TRADITIONAL'
-  });
-});
-
-app.get('/webhook-status', (req, res) => {
-  const data = {
-    status: 'active',
-    service: 'webhook-listener',
-    jsonp: 'enabled',
-    endpoints: [
-      '/test-connection?callback=myCallback',
-      '/shopify/test-jsonp?callback=myCallback',
-      'POST /api/shopify/products',
-      'GET /api/dashboard-data'
-    ]
-  };
-  
-  if (req.query.callback) {
-    res.header('Content-Type', 'application/javascript');
-    res.send(`${req.query.callback}(${JSON.stringify(data)});`);
-    return;
-  }
-  
-  res.json(data);
-});
-
-// ================================
-// IFRAME SANDBOX ENDPOINT
-// ================================
-app.get('/sandbox', (req, res) => {
-  const html = `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>LOFT.73 Sandbox</title>
-    <meta charset="utf-8">
-</head>
-<body>
-    <h1>🔥 LOFT.73 Server Sandbox</h1>
-    <p>Status: <span style="color: green; font-weight: bold;">ONLINE</span></p>
-    <p>JSONP: <span style="color: blue; font-weight: bold;">ENABLED</span></p>
-    <p>CSP Bypass: <span style="color: orange; font-weight: bold;">ACTIVE</span></p>
-    
-    <script>
-        // Test JSONP callback
-        function testCallback(data) {
-            console.log('JSONP Success:', data);
-            document.body.innerHTML += '<div style="color: green;">✅ JSONP Test Successful!</div>';
-        }
-        
-        // Auto-test JSONP
-        const script = document.createElement('script');
-        script.src = '/test-connection?callback=testCallback';
-        document.head.appendChild(script);
-        
-        // PostMessage per parent
-        if (window.parent && window.parent !== window) {
-            window.parent.postMessage({
-                type: 'LOFT73_READY',
-                status: 'online',
-                method: 'iframe_sandbox'
-            }, '*');
-        }
-    </script>
-</body>
-</html>`;
-  
-  res.header('Content-Type', 'text/html');
-  res.send(html);
-});
-
-// ================================
-// ERROR HANDLING
-// ================================
-app.use('*', (req, res) => {
-  const data = {
-    error: 'Endpoint not found',
-    path: req.originalUrl,
-    available: [
-      '/?callback=myFunc',
-      '/test-connection?callback=myFunc',
-      '/shopify/test-jsonp?callback=myFunc',
-      '/sandbox',
-      'POST /api/shopify/products',
-      'GET /api/dashboard-data'
-    ]
-  };
-  
-  if (req.query.callback) {
-    res.header('Content-Type', 'application/javascript');
-    res.send(`${req.query.callback}(${JSON.stringify(data)});`);
-    return;
-  }
-  
-  res.status(404).json(data);
-});
-
-app.use((err, req, res, next) => {
-  console.error('Server Error:', err);
-  
-  const data = {
-    error: 'Internal server error',
-    message: err.message
-  };
-  
-  if (req.query.callback) {
-    res.header('Content-Type', 'application/javascript');
-    res.send(`${req.query.callback}(${JSON.stringify(data)});`);
-    return;
-  }
-  
-  res.status(500).json(data);
-});
-
-// ================================
-// START SERVER
-// ================================
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('🔥 =====================================');
-  console.log('🔥 LOFT.73 SERVER - JSONP BYPASS MODE');
-  console.log(`🔥 PORT: ${PORT}`);
-  console.log('🔥 CORS: ULTIMATE');
-  console.log('🔥 JSONP: ENABLED');
-  console.log('🔥 CSP BYPASS: ACTIVE');
-  console.log('🔥 IFRAME SANDBOX: READY');
-  console.log('🔥 SHOPIFY API: ENABLED');
-  console.log('🔥 =====================================');
-});
-
-module.exports = app;
