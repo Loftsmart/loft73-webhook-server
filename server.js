@@ -1,6 +1,5 @@
 // server.js - API per Dashboard Back in Stock con Shopify
 const express = require('express');
-const cors = require('cors');
 
 // Polyfill per fetch se necessario (Node < 18)
 if (!global.fetch) {
@@ -8,31 +7,29 @@ if (!global.fetch) {
 }
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+
+// IMPORTANTE: Railway imposta automaticamente la PORT
+const PORT = process.env.PORT || 3000;
 
 // Configurazione Shopify
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL || 'loft-73.myshopify.com';
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-01';
 
-// Middleware CORS più permissivo
+// Middleware - IMPORTANTE: l'ordine conta!
+app.use(express.json());
+
+// CORS permissivo
 app.use((req, res, next) => {
-    // Permetti qualsiasi origine
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Max-Age', '86400'); // 24 ore
     
-    // Risposta immediata per preflight
     if (req.method === 'OPTIONS') {
         return res.sendStatus(200);
     }
-    
     next();
 });
-
-app.use(express.json());
 
 // Sistema di cache
 let shopifyCache = {
@@ -47,6 +44,42 @@ function isCacheValid(key) {
     const timestamp = shopifyCache.timestamps[key];
     return timestamp && (Date.now() - timestamp < shopifyCache.TTL);
 }
+
+// =====================================
+// ENDPOINT: Root - IMPORTANTE per Railway
+// =====================================
+app.get('/', (req, res) => {
+    res.json({
+        message: '🚀 Back in Stock Dashboard API',
+        version: '1.0.0',
+        status: 'running',
+        endpoints: [
+            'GET /api/health',
+            'POST /api/shopify/products-availability',
+            'POST /api/shopify/search-products',
+            'POST /api/cache/clear'
+        ]
+    });
+});
+
+// =====================================
+// ENDPOINT: Health check
+// =====================================
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        shopify: {
+            configured: !!SHOPIFY_ACCESS_TOKEN,
+            store: SHOPIFY_STORE_URL,
+            apiVersion: SHOPIFY_API_VERSION
+        },
+        cache: {
+            productsCount: Object.keys(shopifyCache.products).length,
+            inventoryCount: Object.keys(shopifyCache.inventory).length
+        }
+    });
+});
 
 // =====================================
 // FUNZIONE PRINCIPALE: Fetch Prodotti con Varianti e Inventory
@@ -330,7 +363,7 @@ app.post('/api/shopify/products-availability', async (req, res) => {
             products: formattedProducts,
             totalProducts: formattedProducts.length,
             totalVariants: formattedProducts.reduce((sum, p) => sum + p.variants.length, 0),
-            cached: false // Per ora sempre false, potresti implementare logica cache
+            cached: false
         });
         
     } catch (error) {
@@ -387,48 +420,14 @@ app.post('/api/shopify/search-products', async (req, res) => {
 });
 
 // =====================================
-// ENDPOINT: Health check
-// =====================================
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        shopify: {
-            configured: !!SHOPIFY_ACCESS_TOKEN,
-            store: SHOPIFY_STORE_URL,
-            apiVersion: SHOPIFY_API_VERSION
-        },
-        cache: {
-            productsCount: Object.keys(shopifyCache.products).length,
-            inventoryCount: Object.keys(shopifyCache.inventory).length
-        }
-    });
-});
-
-// =====================================
-// ENDPOINT: Root
-// =====================================
-app.get('/', (req, res) => {
-    res.json({
-        message: '🚀 Back in Stock Dashboard API',
-        version: '1.0.0',
-        endpoints: [
-            'GET /api/health',
-            'POST /api/shopify/products-availability',
-            'POST /api/shopify/search-products',
-            'POST /api/cache/clear'
-        ]
-    });
-});
-
-// =====================================
 // ENDPOINT: Clear cache (utile per testing)
 // =====================================
 app.post('/api/cache/clear', (req, res) => {
     shopifyCache = {
         products: {},
         inventory: {},
-        timestamps: {}
+        timestamps: {},
+        TTL: 5 * 60 * 1000
     };
     
     res.json({
@@ -437,8 +436,10 @@ app.post('/api/cache/clear', (req, res) => {
     });
 });
 
-// Avvio server
-app.listen(PORT, () => {
+// =====================================
+// AVVIO SERVER - IMPORTANTE PER RAILWAY
+// =====================================
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`
     🚀 Back in Stock Dashboard API
     ✅ Server attivo su porta ${PORT}
@@ -450,4 +451,14 @@ app.listen(PORT, () => {
     if (!SHOPIFY_ACCESS_TOKEN) {
         console.log('⚠️  ATTENZIONE: SHOPIFY_ACCESS_TOKEN non configurato!');
     }
+});
+
+// Gestione errori non catturati
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+    process.exit(1);
 });
