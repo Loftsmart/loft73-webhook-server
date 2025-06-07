@@ -15,18 +15,21 @@ const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL || 'loft-73.myshopify.com';
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-01';
 
-// Middleware CORS
+// Middleware CORS più permissivo
 app.use((req, res, next) => {
+    // Permetti qualsiasi origine
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
     res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Max-Age', '86400'); // 24 ore
     
+    // Risposta immediata per preflight
     if (req.method === 'OPTIONS') {
-        res.sendStatus(200);
-    } else {
-        next();
+        return res.sendStatus(200);
     }
+    
+    next();
 });
 
 app.use(express.json());
