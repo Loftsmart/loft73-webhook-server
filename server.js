@@ -403,6 +403,22 @@ app.get('/api/health', (req, res) => {
 });
 
 // =====================================
+// ENDPOINT: Root
+// =====================================
+app.get('/', (req, res) => {
+    res.json({
+        message: '🚀 Back in Stock Dashboard API',
+        version: '1.0.0',
+        endpoints: [
+            'GET /api/health',
+            'POST /api/shopify/products-availability',
+            'POST /api/shopify/search-products',
+            'POST /api/cache/clear'
+        ]
+    });
+});
+
+// =====================================
 // ENDPOINT: Clear cache (utile per testing)
 // =====================================
 app.post('/api/cache/clear', (req, res) => {
