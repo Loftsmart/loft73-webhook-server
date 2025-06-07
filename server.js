@@ -1,87 +1,59 @@
-// server.js - Versione con Debug Avanzato
 const express = require('express');
 const cors = require('cors');
-
-// Polyfill per fetch
-if (!global.fetch) {
-    try {
-        global.fetch = require('node-fetch');
-    } catch (e) {
-        console.log('node-fetch non disponibile');
-    }
-}
+const fetch = require('node-fetch');
+require('dotenv').config();
 
 const app = express();
-
 const PORT = process.env.PORT || 3000;
 
-// Configurazione Shopify
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL || 'loft-73.myshopify.com';
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-01';
-
 // Middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cors());
+app.use(express.json());
 
-// Debug middleware
-app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-    if (req.method === 'POST') {
-        console.log('Body preview:', JSON.stringify(req.body).substring(0, 200) + '...');
-    }
-    next();
-});
+// Shopify configuration
+const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const SHOPIFY_API_VERSION = '2024-01';
 
-// Cache
-let shopifyCache = {
-    products: {},
-    inventory: {},
-    timestamps: {},
-    TTL: 5 * 60 * 1000
-};
+// Helper functions
+function normalizeString(str) {
+    if (!str) return '';
+    return str.toLowerCase()
+        .trim()
+        .replace(/\s+/g, ' ')
+        .replace(/[^\w\s]/g, '');
+}
 
-// Root endpoint
-app.get('/', (req, res) => {
-    res.json({
-        message: '🚀 Back in Stock Dashboard API',
-        version: '1.1.0',
-        status: 'running',
-        debug: 'ENABLED',
-        endpoints: [
-            'GET /api/health',
-            'POST /api/shopify/products-availability',
-            'POST /api/shopify/search-products',
-            'GET /api/debug/sample-products'
-        ]
-    });
-});
+function extractProductCore(title) {
+    return title
+        .replace(/^LOFT\.?73\s*/i, '')
+        .replace(/\s*-\s*$/, '')
+        .trim();
+}
 
 // Health check
 app.get('/api/health', (req, res) => {
+    console.log('Health check requested');
     res.json({
-        status: 'healthy',
+        status: 'ok',
         timestamp: new Date().toISOString(),
         shopify: {
-            configured: !!SHOPIFY_ACCESS_TOKEN,
-            store: SHOPIFY_STORE_URL,
-            apiVersion: SHOPIFY_API_VERSION,
-            tokenLength: SHOPIFY_ACCESS_TOKEN ? SHOPIFY_ACCESS_TOKEN.length : 0
-        },
-        cache: {
-            productsCount: Object.keys(shopifyCache.products).length,
-            inventoryCount: Object.keys(shopifyCache.inventory).length
+            configured: !!(SHOPIFY_STORE_URL && SHOPIFY_ACCESS_TOKEN),
+            store: SHOPIFY_STORE_URL ? SHOPIFY_STORE_URL.replace('.myshopify.com', '') : null
         }
     });
 });
 
-// DEBUG: Get sample products
-app.get('/api/debug/sample-products', async (req, res) => {
-    console.log('🔍 DEBUG: Fetching sample products...');
+// Search products endpoint
+app.post('/api/shopify/search-products', async (req, res) => {
+    console.log('\n🔍 === SEARCH PRODUCTS REQUEST ===');
     
     try {
-        const url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=5`;
+        const { searchTerm } = req.body;
+        console.log(`Searching for: "${searchTerm}"`);
+        
+        const url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?title=${encodeURIComponent(searchTerm)}&limit=10`;
+        
         const response = await fetch(url, {
             headers: {
                 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
@@ -94,104 +66,21 @@ app.get('/api/debug/sample-products', async (req, res) => {
         }
         
         const data = await response.json();
-        const sampleProducts = data.products.map(p => ({
-            title: p.title,
-            handle: p.handle,
-            variants: p.variants.slice(0, 2).map(v => ({
-                sku: v.sku,
-                title: v.title
+        console.log(`Found ${data.products.length} products`);
+        
+        res.json({
+            success: true,
+            products: data.products.map(p => ({
+                id: p.id,
+                title: p.title,
+                handle: p.handle,
+                variants: p.variants.map(v => ({
+                    id: v.id,
+                    sku: v.sku,
+                    title: v.title,
+                    available: v.inventory_quantity || 0
+                }))
             }))
-        }));
-        
-        console.log('Sample products:', sampleProducts);
-        
-        res.json({
-            success: true,
-            count: sampleProducts.length,
-            products: sampleProducts
-        });
-        
-    } catch (error) {
-        console.error('Debug sample error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// Search products
-app.post('/api/shopify/search-products', async (req, res) => {
-    const { searchTerm } = req.body;
-    
-    console.log(`🔍 SEARCH: Looking for "${searchTerm}"`);
-    
-    if (!searchTerm || searchTerm.length < 2) {
-        return res.json({ success: true, products: [] });
-    }
-
-    try {
-        // Prima prova a cercare per titolo
-        let url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?title=${encodeURIComponent(searchTerm)}&limit=50`;
-        
-        console.log(`Searching URL: ${url}`);
-        
-        const response = await fetch(url, {
-            headers: {
-                'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error(`Search failed: ${response.status}`);
-        }
-
-        const data = await response.json();
-        let products = data.products || [];
-        
-        console.log(`Found ${products.length} products by title`);
-        
-        // Se non trova nulla, prova con tutti i prodotti e filtra
-        if (products.length === 0) {
-            console.log('No products found by title, fetching all and filtering...');
-            
-            const allProductsUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
-            const allResponse = await fetch(allProductsUrl, {
-                headers: {
-                    'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            if (allResponse.ok) {
-                const allData = await allResponse.json();
-                const searchLower = searchTerm.toLowerCase();
-                
-                products = allData.products.filter(product => {
-                    // Cerca nel titolo
-                    if (product.title.toLowerCase().includes(searchLower)) return true;
-                    
-                    // Cerca negli SKU delle varianti
-                    return product.variants.some(v => 
-                        v.sku && v.sku.toLowerCase().includes(searchLower)
-                    );
-                });
-                
-                console.log(`Found ${products.length} products by filtering`);
-            }
-        }
-        
-        // Log primi risultati
-        products.slice(0, 3).forEach(p => {
-            console.log(`- ${p.title} (${p.variants.length} variants)`);
-        });
-        
-        res.json({
-            success: true,
-            products: products,
-            totalResults: products.length,
-            searchTerm: searchTerm
         });
         
     } catch (error) {
@@ -203,7 +92,7 @@ app.post('/api/shopify/search-products', async (req, res) => {
     }
 });
 
-// Main sync endpoint
+// Main products availability endpoint with enhanced matching
 app.post('/api/shopify/products-availability', async (req, res) => {
     console.log('\n🚀 === PRODUCTS AVAILABILITY REQUEST ===');
     
@@ -214,31 +103,25 @@ app.post('/api/shopify/products-availability', async (req, res) => {
         console.log(`- Product names: ${productNames?.length || 0}`);
         console.log(`- SKU prefixes: ${skuPrefixes?.length || 0}`);
         
-        if (productNames && productNames.length > 0) {
-            console.log('First 5 product names:', productNames.slice(0, 5));
+        // Log sample data
+        if (productNames?.length > 0) {
+            console.log('Sample product names:', productNames.slice(0, 3));
+        }
+        if (skuPrefixes?.length > 0) {
+            console.log('Sample SKUs:', skuPrefixes.slice(0, 3));
         }
         
-        if (skuPrefixes && skuPrefixes.length > 0) {
-            console.log('First 5 SKU prefixes:', skuPrefixes.slice(0, 5));
-        }
-
-        // Fetch all products
-        console.log('\n📥 Fetching products from Shopify...');
+        // Fetch all products from Shopify
         let allProducts = [];
-        let page_info = null;
-        let pageCount = 0;
+        let hasNextPage = true;
+        let pageInfo = null;
         
-        while (pageCount < 10) { // Limit pages for safety
-            pageCount++;
-            
-            let url;
-            if (page_info) {
-                url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?page_info=${page_info}&limit=250`;
-            } else {
-                url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
-            }
-            
-            console.log(`Fetching page ${pageCount}...`);
+        console.log('\n📥 Fetching products from Shopify...');
+        
+        while (hasNextPage) {
+            const url = pageInfo 
+                ? `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250&page_info=${pageInfo}`
+                : `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
             
             const response = await fetch(url, {
                 headers: {
@@ -248,106 +131,155 @@ app.post('/api/shopify/products-availability', async (req, res) => {
             });
             
             if (!response.ok) {
-                console.error(`❌ Shopify API error: ${response.status}`);
-                break;
+                throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
             }
             
             const data = await response.json();
-            allProducts = allProducts.concat(data.products || []);
+            allProducts = allProducts.concat(data.products);
             
             // Check for next page
-            const linkHeader = response.headers.get('Link');
+            const linkHeader = response.headers.get('link');
             if (linkHeader && linkHeader.includes('rel="next"')) {
-                const matches = linkHeader.match(/page_info=([^&>]+).*?rel="next"/);
-                if (matches && matches[1]) {
-                    page_info = matches[1];
-                } else {
-                    break;
-                }
+                const matches = linkHeader.match(/<[^>]+page_info=([^>]+)>; rel="next"/);
+                pageInfo = matches ? matches[1] : null;
+                hasNextPage = !!pageInfo;
             } else {
-                break;
+                hasNextPage = false;
             }
         }
         
         console.log(`✅ Fetched ${allProducts.length} total products from Shopify`);
         
-        // Log some product names for debugging
-        console.log('\nSample Shopify product titles:');
-        allProducts.slice(0, 5).forEach(p => {
-            console.log(`- "${p.title}" (SKU: ${p.variants[0]?.sku || 'N/A'})`);
-        });
+        // Enhanced matching logic
+        const matchedProductsMap = new Map();
         
-        // Filter products based on request
-        let matchedProducts = [];
+        // Prepare lookup maps for faster matching
+        const csvSkuMap = new Map();
+        const csvNameMap = new Map();
         
-        if (productNames && productNames.length > 0) {
-            console.log('\n🔍 Matching by product names...');
-            
-            matchedProducts = allProducts.filter(product => {
-                // Try multiple matching strategies
-                const productTitle = product.title;
-                
-                // Strategy 1: Exact match
-                if (productNames.includes(productTitle)) {
-                    console.log(`✅ Exact match: "${productTitle}"`);
-                    return true;
-                }
-                
-                // Strategy 2: Case insensitive match
-                const titleLower = productTitle.toLowerCase();
-                const found = productNames.some(name => {
-                    if (name.toLowerCase() === titleLower) {
-                        console.log(`✅ Case-insensitive match: "${productTitle}" = "${name}"`);
-                        return true;
-                    }
-                    return false;
-                });
-                
-                if (found) return true;
-                
-                // Strategy 3: Contains match
-                const containsMatch = productNames.some(name => {
-                    if (titleLower.includes(name.toLowerCase()) || name.toLowerCase().includes(titleLower)) {
-                        console.log(`✅ Contains match: "${productTitle}" ~ "${name}"`);
-                        return true;
-                    }
-                    return false;
-                });
-                
-                return containsMatch;
+        if (skuPrefixes) {
+            skuPrefixes.forEach(sku => {
+                csvSkuMap.set(sku.toUpperCase(), sku);
+                csvSkuMap.set(sku.replace(/[^A-Z0-9]/gi, '').toUpperCase(), sku);
             });
-            
-            console.log(`Matched ${matchedProducts.length} products by name`);
         }
         
-        if (skuPrefixes && skuPrefixes.length > 0) {
-            console.log('\n🔍 Matching by SKU prefixes...');
+        if (productNames) {
+            productNames.forEach(name => {
+                csvNameMap.set(normalizeString(name), name);
+                csvNameMap.set(normalizeString(extractProductCore(name)), name);
+            });
+        }
+        
+        console.log('\n🔍 Starting combined matching (SKU + Name)...');
+        
+        // Match products
+        for (const product of allProducts) {
+            let matchScore = 0;
+            let matchReasons = [];
             
-            const skuMatched = allProducts.filter(product => {
-                return product.variants.some(variant => {
-                    if (!variant.sku) return false;
+            // SKU matching
+            let skuMatch = false;
+            if (csvSkuMap.size > 0) {
+                for (const variant of product.variants) {
+                    if (!variant.sku) continue;
                     
-                    return skuPrefixes.some(prefix => {
-                        if (variant.sku.startsWith(prefix)) {
-                            console.log(`✅ SKU match: "${variant.sku}" starts with "${prefix}"`);
-                            return true;
+                    const variantSkuUpper = variant.sku.toUpperCase();
+                    const variantSkuClean = variant.sku.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+                    
+                    if (csvSkuMap.has(variantSkuUpper)) {
+                        skuMatch = true;
+                        matchScore += 10;
+                        matchReasons.push(`SKU exact: ${variant.sku}`);
+                        break;
+                    }
+                    
+                    if (csvSkuMap.has(variantSkuClean)) {
+                        skuMatch = true;
+                        matchScore += 8;
+                        matchReasons.push(`SKU clean: ${variant.sku}`);
+                        break;
+                    }
+                    
+                    for (const [csvSku, originalSku] of csvSkuMap) {
+                        if (variantSkuUpper.startsWith(csvSku) || csvSku.startsWith(variantSkuUpper)) {
+                            skuMatch = true;
+                            matchScore += 5;
+                            matchReasons.push(`SKU partial: ${variant.sku} ~ ${originalSku}`);
+                            break;
                         }
-                        return false;
-                    });
-                });
-            });
-            
-            console.log(`Matched ${skuMatched.length} products by SKU`);
-            
-            // Merge with name matches
-            skuMatched.forEach(product => {
-                if (!matchedProducts.find(p => p.id === product.id)) {
-                    matchedProducts.push(product);
+                    }
+                    
+                    if (skuMatch) break;
                 }
-            });
+            }
+            
+            // Name matching
+            let nameMatch = false;
+            const productTitleNorm = normalizeString(product.title);
+            const productCore = normalizeString(extractProductCore(product.title));
+            
+            if (csvNameMap.has(productTitleNorm)) {
+                nameMatch = true;
+                matchScore += 5;
+                matchReasons.push(`Name exact: ${product.title}`);
+            }
+            else if (csvNameMap.has(productCore)) {
+                nameMatch = true;
+                matchScore += 4;
+                matchReasons.push(`Name core: ${product.title}`);
+            }
+            else {
+                for (const [csvName, originalName] of csvNameMap) {
+                    if (productTitleNorm.includes(csvName) || csvName.includes(productTitleNorm)) {
+                        nameMatch = true;
+                        matchScore += 3;
+                        matchReasons.push(`Name partial: ${product.title} ~ ${originalName}`);
+                        break;
+                    }
+                }
+            }
+            
+            // Include product if match score is sufficient
+            if (matchScore >= 3) {
+                console.log(`✅ Match found (score: ${matchScore}): ${product.title}`);
+                console.log(`   Reasons: ${matchReasons.join(', ')}`);
+                matchedProductsMap.set(product.id, product);
+            }
         }
         
-        console.log(`\n📊 FINAL: Matched ${matchedProducts.length} products total`);
+        const matchedProducts = Array.from(matchedProductsMap.values());
+        console.log(`\n📊 Matched ${matchedProducts.length} products`);
+        
+        // Fetch inventory levels for matched products
+        console.log('\n📦 Fetching inventory levels...');
+        
+        for (const product of matchedProducts) {
+            for (const variant of product.variants) {
+                if (variant.inventory_item_id) {
+                    try {
+                        const inventoryUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/inventory_levels.json?inventory_item_ids=${variant.inventory_item_id}`;
+                        
+                        const invResponse = await fetch(inventoryUrl, {
+                            headers: {
+                                'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+                                'Content-Type': 'application/json'
+                            }
+                        });
+                        
+                        if (invResponse.ok) {
+                            const invData = await invResponse.json();
+                            if (invData.inventory_levels && invData.inventory_levels[0]) {
+                                variant.available = invData.inventory_levels[0].available || 0;
+                            }
+                        }
+                    } catch (error) {
+                        console.error(`Error fetching inventory for variant ${variant.id}:`, error);
+                        variant.available = 0;
+                    }
+                }
+            }
+        }
         
         // Format response
         const formattedProducts = matchedProducts.map(product => ({
@@ -355,30 +287,31 @@ app.post('/api/shopify/products-availability', async (req, res) => {
             title: product.title,
             handle: product.handle,
             product_type: product.product_type,
+            tags: product.tags,
             variants: product.variants.map(variant => ({
                 id: variant.id,
-                sku: variant.sku,
-                color: variant.option2 || variant.option1,
+                sku: variant.sku || '',
+                color: variant.option2 || variant.option1 || 'Standard',
                 size: variant.option1 || 'TU',
                 price: variant.price,
-                available: variant.inventory_quantity || 0,
-                inventory_quantity: variant.inventory_quantity
+                available: variant.available || 0,
+                inventory_quantity: variant.inventory_quantity || 0
             }))
         }));
         
-        console.log('✅ Sending response with products');
+        // Summary
+        console.log('\n📊 === RESPONSE SUMMARY ===');
+        console.log(`Total products: ${formattedProducts.length}`);
+        console.log(`Total variants: ${formattedProducts.reduce((sum, p) => sum + p.variants.length, 0)}`);
+        console.log(`Total available items: ${formattedProducts.reduce((sum, p) => 
+            sum + p.variants.reduce((vSum, v) => vSum + v.available, 0), 0)}`);
         
         res.json({
             success: true,
             products: formattedProducts,
             totalProducts: formattedProducts.length,
             totalVariants: formattedProducts.reduce((sum, p) => sum + p.variants.length, 0),
-            debug: {
-                requestedNames: productNames?.length || 0,
-                requestedSkus: skuPrefixes?.length || 0,
-                shopifyTotal: allProducts.length,
-                matched: matchedProducts.length
-            }
+            timestamp: new Date().toISOString()
         });
         
     } catch (error) {
@@ -386,60 +319,22 @@ app.post('/api/shopify/products-availability', async (req, res) => {
         res.status(500).json({ 
             success: false, 
             error: error.message,
-            details: error.stack
+            timestamp: new Date().toISOString()
         });
     }
 });
 
-// Clear cache
-app.post('/api/cache/clear', (req, res) => {
-    shopifyCache = {
-        products: {},
-        inventory: {},
-        timestamps: {},
-        TTL: 5 * 60 * 1000
-    };
-    
-    console.log('🧹 Cache cleared');
-    
-    res.json({
-        success: true,
-        message: 'Cache cleared successfully'
-    });
-});
-
-// Error handler
-app.use((err, req, res, next) => {
-    console.error('❌ Unhandled error:', err);
-    res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-        message: err.message
-    });
-});
-
 // Start server
-const server = app.listen(PORT, () => {
-    console.log(`
-    🚀 Back in Stock Dashboard API - DEBUG VERSION
-    ✅ Server running on port ${PORT}
-    🏪 Store: ${SHOPIFY_STORE_URL}
-    📦 API Version: ${SHOPIFY_API_VERSION}
-    🔐 Token configured: ${!!SHOPIFY_ACCESS_TOKEN}
-    🔍 Debug mode: ENABLED
-    📅 Started: ${new Date().toISOString()}
-    `);
+app.listen(PORT, () => {
+    console.log(`\n🚀 Server running on port ${PORT}`);
+    console.log(`📍 API endpoints:`);
+    console.log(`   - GET  /api/health`);
+    console.log(`   - POST /api/shopify/search-products`);
+    console.log(`   - POST /api/shopify/products-availability`);
     
-    if (!SHOPIFY_ACCESS_TOKEN) {
-        console.log('⚠️  WARNING: SHOPIFY_ACCESS_TOKEN not configured!');
+    if (SHOPIFY_STORE_URL && SHOPIFY_ACCESS_TOKEN) {
+        console.log(`\n✅ Shopify configured for store: ${SHOPIFY_STORE_URL}`);
+    } else {
+        console.log(`\n⚠️  Shopify NOT configured! Check your .env file`);
     }
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received, shutting down...');
-    server.close(() => {
-        console.log('Server closed');
-        process.exit(0);
-    });
 });
