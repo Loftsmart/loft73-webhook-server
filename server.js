@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,10 +9,16 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Shopify configuration
+// Shopify configuration - Prende direttamente dalle variabili d'ambiente
 const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_API_VERSION = '2024-01';
+
+// Log configuration on startup
+console.log('Starting server with configuration:');
+console.log('PORT:', PORT);
+console.log('SHOPIFY_STORE_URL:', SHOPIFY_STORE_URL ? 'Configured' : 'NOT CONFIGURED');
+console.log('SHOPIFY_ACCESS_TOKEN:', SHOPIFY_ACCESS_TOKEN ? 'Configured' : 'NOT CONFIGURED');
 
 // Helper functions
 function normalizeString(str) {
@@ -335,6 +340,6 @@ app.listen(PORT, () => {
     if (SHOPIFY_STORE_URL && SHOPIFY_ACCESS_TOKEN) {
         console.log(`\n✅ Shopify configured for store: ${SHOPIFY_STORE_URL}`);
     } else {
-        console.log(`\n⚠️  Shopify NOT configured! Check your .env file`);
+        console.log(`\n⚠️  Shopify NOT configured! Check your environment variables`);
     }
 });
