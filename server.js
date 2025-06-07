@@ -1,9 +1,14 @@
-// server.js - API per Dashboard Back in Stock con Shopify
+// server.js - API per Dashboard Back in Stock con Shopify - Ottimizzata per Railway
 const express = require('express');
+const cors = require('cors');
 
-// Polyfill per fetch se necessario (Node < 18)
+// Polyfill per fetch solo se necessario (Node < 18)
 if (!global.fetch) {
-    global.fetch = require('node-fetch');
+    try {
+        global.fetch = require('node-fetch');
+    } catch (e) {
+        console.log('node-fetch non disponibile, usando fetch nativo');
+    }
 }
 
 const app = express();
@@ -16,18 +21,21 @@ const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL || 'loft-73.myshopify.com';
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-01';
 
-// Middleware - IMPORTANTE: l'ordine conta!
-app.use(express.json());
+// Middleware essenziali
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// CORS permissivo
+// CORS - usa il middleware standard
+app.use(cors({
+    origin: '*', // In produzione, specifica i domini permessi
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
+
+// Logging middleware
 app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-    
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
-    }
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
     next();
 });
 
@@ -53,6 +61,7 @@ app.get('/', (req, res) => {
         message: '🚀 Back in Stock Dashboard API',
         version: '1.0.0',
         status: 'running',
+        timestamp: new Date().toISOString(),
         endpoints: [
             'GET /api/health',
             'POST /api/shopify/products-availability',
@@ -69,6 +78,7 @@ app.get('/api/health', (req, res) => {
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
         shopify: {
             configured: !!SHOPIFY_ACCESS_TOKEN,
             store: SHOPIFY_STORE_URL,
@@ -77,12 +87,153 @@ app.get('/api/health', (req, res) => {
         cache: {
             productsCount: Object.keys(shopifyCache.products).length,
             inventoryCount: Object.keys(shopifyCache.inventory).length
+        },
+        environment: {
+            node: process.version,
+            platform: process.platform,
+            port: PORT
         }
     });
 });
 
 // =====================================
-// FUNZIONE PRINCIPALE: Fetch Prodotti con Varianti e Inventory
+// FUNZIONE: Fetch tutti i prodotti con paginazione
+// =====================================
+async function fetchAllProducts() {
+    let allProducts = [];
+    let page_info = null;
+    let hasNextPage = true;
+    let pageCount = 0;
+    
+    while (hasNextPage && pageCount < 10) { // Limita a 10 pagine per sicurezza
+        pageCount++;
+        let url;
+        
+        if (page_info) {
+            url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?page_info=${page_info}&limit=250`;
+        } else {
+            url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
+        }
+        
+        try {
+            const response = await fetch(url, {
+                headers: {
+                    'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 30000 // 30 secondi timeout
+            });
+            
+            if (!response.ok) {
+                console.error(`❌ Errore Shopify API: ${response.status} ${response.statusText}`);
+                break;
+            }
+            
+            const data = await response.json();
+            allProducts = allProducts.concat(data.products || []);
+            
+            // Check paginazione
+            const linkHeader = response.headers.get('Link');
+            if (linkHeader && linkHeader.includes('rel="next"')) {
+                const matches = linkHeader.match(/page_info=([^&>]+).*?rel="next"/);
+                if (matches && matches[1]) {
+                    page_info = matches[1];
+                } else {
+                    hasNextPage = false;
+                }
+            } else {
+                hasNextPage = false;
+            }
+        } catch (error) {
+            console.error('Errore nel fetch dei prodotti:', error);
+            break;
+        }
+    }
+    
+    console.log(`✅ Recuperati ${allProducts.length} prodotti in ${pageCount} pagine`);
+    return allProducts;
+}
+
+// =====================================
+// FUNZIONE: Fetch inventory levels
+// =====================================
+async function fetchInventoryLevels(variantIds) {
+    const inventoryData = {};
+    
+    // Shopify limita a 50 inventory items per chiamata
+    const chunks = [];
+    for (let i = 0; i < variantIds.length; i += 50) {
+        chunks.push(variantIds.slice(i, i + 50));
+    }
+    
+    console.log(`📦 Recupero inventory per ${variantIds.length} varianti in ${chunks.length} chiamate`);
+    
+    for (const chunk of chunks) {
+        const cacheKey = `inventory_${chunk.join('_')}`;
+        
+        if (isCacheValid(cacheKey) && shopifyCache.inventory[cacheKey]) {
+            Object.assign(inventoryData, shopifyCache.inventory[cacheKey]);
+            continue;
+        }
+        
+        try {
+            // Prima ottieni gli inventory_item_ids dalle varianti
+            const variantUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/variants.json?ids=${chunk.join(',')}`;
+            
+            const variantResponse = await fetch(variantUrl, {
+                headers: {
+                    'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 30000
+            });
+            
+            if (variantResponse.ok) {
+                const variantData = await variantResponse.json();
+                const inventoryItemIds = variantData.variants.map(v => v.inventory_item_id).filter(Boolean);
+                
+                if (inventoryItemIds.length > 0) {
+                    // Poi fetch i livelli di inventory
+                    const inventoryUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/inventory_levels.json?inventory_item_ids=${inventoryItemIds.join(',')}`;
+                    
+                    const inventoryResponse = await fetch(inventoryUrl, {
+                        headers: {
+                            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+                            'Content-Type': 'application/json'
+                        },
+                        timeout: 30000
+                    });
+                    
+                    if (inventoryResponse.ok) {
+                        const invData = await inventoryResponse.json();
+                        
+                        // Mappa inventory_item_id a variant_id
+                        const variantToInventory = {};
+                        variantData.variants.forEach(variant => {
+                            const invLevel = invData.inventory_levels.find(
+                                il => il.inventory_item_id === variant.inventory_item_id
+                            );
+                            variantToInventory[variant.id] = {
+                                available: invLevel ? invLevel.available : 0
+                            };
+                        });
+                        
+                        Object.assign(inventoryData, variantToInventory);
+                        shopifyCache.inventory[cacheKey] = variantToInventory;
+                        shopifyCache.timestamps[cacheKey] = Date.now();
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Errore fetch inventory per chunk:', error.message);
+        }
+    }
+    
+    return inventoryData;
+}
+
+// =====================================
+// FUNZIONE PRINCIPALE: Fetch Prodotti con Inventory
 // =====================================
 async function fetchProductsWithInventory(productHandles = []) {
     if (!SHOPIFY_ACCESS_TOKEN) {
@@ -93,7 +244,6 @@ async function fetchProductsWithInventory(productHandles = []) {
     try {
         console.log(`📥 Recupero prodotti e inventory da Shopify...`);
         
-        // Se abbiamo handles specifici, cerca solo quelli
         let products = [];
         
         if (productHandles.length > 0) {
@@ -108,25 +258,30 @@ async function fetchProductsWithInventory(productHandles = []) {
                 
                 const url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?handle=${handle}`;
                 
-                const response = await fetch(url, {
-                    headers: {
-                        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-                        'Content-Type': 'application/json'
+                try {
+                    const response = await fetch(url, {
+                        headers: {
+                            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+                            'Content-Type': 'application/json'
+                        },
+                        timeout: 30000
+                    });
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.products && data.products.length > 0) {
+                            const product = data.products[0];
+                            shopifyCache.products[cacheKey] = product;
+                            shopifyCache.timestamps[cacheKey] = Date.now();
+                            products.push(product);
+                        }
                     }
-                });
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.products && data.products.length > 0) {
-                        const product = data.products[0];
-                        shopifyCache.products[cacheKey] = product;
-                        shopifyCache.timestamps[cacheKey] = Date.now();
-                        products.push(product);
-                    }
+                } catch (error) {
+                    console.error(`Errore fetch prodotto ${handle}:`, error.message);
                 }
             }
         } else {
-            // Fetch tutti i prodotti (con paginazione)
+            // Fetch tutti i prodotti
             const cacheKey = 'all_products';
             
             if (isCacheValid(cacheKey) && shopifyCache.products[cacheKey]) {
@@ -185,123 +340,6 @@ async function fetchProductsWithInventory(productHandles = []) {
     }
 }
 
-// Fetch tutti i prodotti con paginazione
-async function fetchAllProducts() {
-    let allProducts = [];
-    let page_info = null;
-    let hasNextPage = true;
-    
-    while (hasNextPage) {
-        let url;
-        
-        if (page_info) {
-            url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?page_info=${page_info}&limit=250`;
-        } else {
-            url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
-        }
-        
-        const response = await fetch(url, {
-            headers: {
-                'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-                'Content-Type': 'application/json'
-            }
-        });
-        
-        if (!response.ok) {
-            console.error(`❌ Errore Shopify API: ${response.status}`);
-            break;
-        }
-        
-        const data = await response.json();
-        allProducts = allProducts.concat(data.products);
-        
-        // Check paginazione
-        const linkHeader = response.headers.get('Link');
-        if (linkHeader && linkHeader.includes('rel="next"')) {
-            const matches = linkHeader.match(/page_info=([^&>]+).*?rel="next"/);
-            if (matches && matches[1]) {
-                page_info = matches[1];
-            } else {
-                hasNextPage = false;
-            }
-        } else {
-            hasNextPage = false;
-        }
-    }
-    
-    return allProducts;
-}
-
-// Fetch inventory levels per variant IDs
-async function fetchInventoryLevels(variantIds) {
-    const inventoryData = {};
-    
-    // Shopify limita a 50 inventory items per chiamata
-    const chunks = [];
-    for (let i = 0; i < variantIds.length; i += 50) {
-        chunks.push(variantIds.slice(i, i + 50));
-    }
-    
-    for (const chunk of chunks) {
-        const cacheKey = `inventory_${chunk.join('_')}`;
-        
-        if (isCacheValid(cacheKey) && shopifyCache.inventory[cacheKey]) {
-            Object.assign(inventoryData, shopifyCache.inventory[cacheKey]);
-            continue;
-        }
-        
-        try {
-            // Prima ottieni gli inventory_item_ids dalle varianti
-            const variantUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/variants.json?ids=${chunk.join(',')}`;
-            
-            const variantResponse = await fetch(variantUrl, {
-                headers: {
-                    'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            if (variantResponse.ok) {
-                const variantData = await variantResponse.json();
-                const inventoryItemIds = variantData.variants.map(v => v.inventory_item_id);
-                
-                // Poi fetch i livelli di inventory
-                const inventoryUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/inventory_levels.json?inventory_item_ids=${inventoryItemIds.join(',')}`;
-                
-                const inventoryResponse = await fetch(inventoryUrl, {
-                    headers: {
-                        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-                        'Content-Type': 'application/json'
-                    }
-                });
-                
-                if (inventoryResponse.ok) {
-                    const invData = await inventoryResponse.json();
-                    
-                    // Mappa inventory_item_id a variant_id
-                    const variantToInventory = {};
-                    variantData.variants.forEach(variant => {
-                        const invLevel = invData.inventory_levels.find(
-                            il => il.inventory_item_id === variant.inventory_item_id
-                        );
-                        variantToInventory[variant.id] = {
-                            available: invLevel ? invLevel.available : 0
-                        };
-                    });
-                    
-                    Object.assign(inventoryData, variantToInventory);
-                    shopifyCache.inventory[cacheKey] = variantToInventory;
-                    shopifyCache.timestamps[cacheKey] = Date.now();
-                }
-            }
-        } catch (error) {
-            console.error('Errore fetch inventory per chunk:', error);
-        }
-    }
-    
-    return inventoryData;
-}
-
 // =====================================
 // ENDPOINT: Ottieni varianti disponibili per prodotti
 // =====================================
@@ -315,7 +353,7 @@ app.post('/api/shopify/products-availability', async (req, res) => {
             skuPrefixes: skuPrefixes?.length || 0
         });
         
-        // Fetch tutti i prodotti o solo quelli richiesti
+        // Fetch prodotti
         const products = await fetchProductsWithInventory(productHandles || []);
         
         // Filtra per match con i dati del CSV
@@ -323,7 +361,6 @@ app.post('/api/shopify/products-availability', async (req, res) => {
         
         if (productNames && productNames.length > 0) {
             matchedProducts = products.filter(product => {
-                // Match per nome prodotto
                 return productNames.some(name => 
                     product.title.toLowerCase().includes(name.toLowerCase())
                 );
@@ -332,7 +369,6 @@ app.post('/api/shopify/products-availability', async (req, res) => {
         
         if (skuPrefixes && skuPrefixes.length > 0) {
             matchedProducts = matchedProducts.filter(product => {
-                // Match per SKU prefix
                 return product.variants.some(variant => 
                     skuPrefixes.some(prefix => 
                         variant.sku && variant.sku.startsWith(prefix)
@@ -341,7 +377,7 @@ app.post('/api/shopify/products-availability', async (req, res) => {
             });
         }
         
-        // Formatta risposta per la Dashboard
+        // Formatta risposta
         const formattedProducts = matchedProducts.map(product => ({
             id: product.id,
             title: product.title,
@@ -350,8 +386,8 @@ app.post('/api/shopify/products-availability', async (req, res) => {
             variants: product.variants.map(variant => ({
                 id: variant.id,
                 sku: variant.sku,
-                color: variant.option2 || variant.option1, // Assumendo option2 = colore
-                size: variant.option1 || 'TU', // Assumendo option1 = taglia
+                color: variant.option2 || variant.option1,
+                size: variant.option1 || 'TU',
                 price: variant.price,
                 available: variant.available,
                 inventory_quantity: variant.inventory_quantity
@@ -363,7 +399,7 @@ app.post('/api/shopify/products-availability', async (req, res) => {
             products: formattedProducts,
             totalProducts: formattedProducts.length,
             totalVariants: formattedProducts.reduce((sum, p) => sum + p.variants.length, 0),
-            cached: false
+            timestamp: new Date().toISOString()
         });
         
     } catch (error) {
@@ -377,21 +413,24 @@ app.post('/api/shopify/products-availability', async (req, res) => {
 });
 
 // =====================================
-// ENDPOINT: Search prodotti per nome/SKU
+// ENDPOINT: Search prodotti
 // =====================================
 app.post('/api/shopify/search-products', async (req, res) => {
     try {
         const { searchTerm } = req.body;
         
         if (!searchTerm || searchTerm.length < 2) {
-            return res.json({ success: true, products: [] });
+            return res.json({ 
+                success: true, 
+                products: [],
+                message: 'Search term too short'
+            });
         }
         
         const products = await fetchProductsWithInventory();
         
+        const searchLower = searchTerm.toLowerCase();
         const matchedProducts = products.filter(product => {
-            const searchLower = searchTerm.toLowerCase();
-            
             // Match per titolo
             if (product.title.toLowerCase().includes(searchLower)) {
                 return true;
@@ -406,7 +445,8 @@ app.post('/api/shopify/search-products', async (req, res) => {
         res.json({
             success: true,
             products: matchedProducts,
-            totalResults: matchedProducts.length
+            totalResults: matchedProducts.length,
+            searchTerm: searchTerm
         });
         
     } catch (error) {
@@ -420,7 +460,7 @@ app.post('/api/shopify/search-products', async (req, res) => {
 });
 
 // =====================================
-// ENDPOINT: Clear cache (utile per testing)
+// ENDPOINT: Clear cache
 // =====================================
 app.post('/api/cache/clear', (req, res) => {
     shopifyCache = {
@@ -430,22 +470,50 @@ app.post('/api/cache/clear', (req, res) => {
         TTL: 5 * 60 * 1000
     };
     
+    console.log('🧹 Cache cleared');
+    
     res.json({
         success: true,
-        message: 'Cache cleared successfully'
+        message: 'Cache cleared successfully',
+        timestamp: new Date().toISOString()
     });
 });
 
 // =====================================
-// AVVIO SERVER - IMPORTANTE PER RAILWAY
+// Error handler
 // =====================================
-app.listen(PORT, '0.0.0.0', () => {
+app.use((err, req, res, next) => {
+    console.error('Error:', err);
+    res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+        message: err.message
+    });
+});
+
+// =====================================
+// 404 handler
+// =====================================
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        error: 'Endpoint not found',
+        path: req.path
+    });
+});
+
+// =====================================
+// AVVIO SERVER
+// =====================================
+const server = app.listen(PORT, () => {
     console.log(`
     🚀 Back in Stock Dashboard API
     ✅ Server attivo su porta ${PORT}
     🏪 Store: ${SHOPIFY_STORE_URL}
     📦 API Version: ${SHOPIFY_API_VERSION}
     🔐 Token configurato: ${!!SHOPIFY_ACCESS_TOKEN}
+    🌐 URL: http://localhost:${PORT}
+    📅 Started: ${new Date().toISOString()}
     `);
     
     if (!SHOPIFY_ACCESS_TOKEN) {
@@ -453,7 +521,10 @@ app.listen(PORT, '0.0.0.0', () => {
     }
 });
 
-// Gestione errori non catturati
+// Timeout per Railway
+server.timeout = 120000; // 2 minuti
+
+// Gestione errori
 process.on('unhandledRejection', (err) => {
     console.error('Unhandled rejection:', err);
 });
@@ -461,4 +532,21 @@ process.on('unhandledRejection', (err) => {
 process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err);
     process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully');
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('SIGINT received, shutting down gracefully');
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
 });
